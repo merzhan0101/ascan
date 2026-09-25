@@ -1,11 +1,21 @@
 import { useState, useEffect, useMemo } from "react";
 import Dropdown from "./components/Dropdown";
 import SearchBar from "./components/SearchBar";
-import GridButton from "./components/GridButton";
 import styles from "./App.module.css";
 import Modal from "./components/Modal";
 import ToggleSwitch from "./components/ToggleSwitch";
 import SearchableDropdown from "./components/SearchableDropdown";
+import LineBlock from "./components/LineBlock";
+
+const EMPTY_LINE = { items: [], error: null };
+const EMPTY_LINES = { line_one: EMPTY_LINE, line_two: EMPTY_LINE, pr_6: EMPTY_LINE };
+
+// Какие линии относятся к какому участку
+const SECTION_LINES = {
+  "КПЦ": ["line_one", "line_two"],
+  "Пролет №6": ["pr_6"],
+};
+
 // Функция для загрузки данных с /ascan
 const fetchData = async () => {
   try {
@@ -14,26 +24,53 @@ const fetchData = async () => {
     return data;
   } catch (error) {
     console.error("Ошибка загрузки данных:", error);
-    return { batch_number_kpc: [], batch_number_6pr: [], malting_for_kpc: [], malting_for_6pr: []};
+    return {
+      batch_number_kpc: [], batch_number_6pr: [], malting_for_kpc: [], malting_for_6pr: [],
+      errors: { server: "Сервер Асканов не отвечает" },
+    };
   }
 };
 
-const sendBatchData = async (place, batchNumber, maltingNumber, setNumbers, setNumberOneLine, setNumberTwoLine) => {
-  if (!batchNumber && !maltingNumber) return; // Если batchNumber не выбран — не отправляем запрос
+// Ответ сервера по одной линии -> { items: [колёса], error }
+// Сервер отдаёт массивы (hot_number[i], batch_number[i], ...), собираем их в объекты колёс.
+const toLine = (line) => {
+  const d = line?.data;
+  const items = d
+    ? (d.hot_number || [])
+        .map((num, i) => ({
+          index: i,
+          num,
+          hot_number: num,
+          malting_namber: d.malting_namber?.[i],
+          batch_number: d.batch_number?.[i],
+          task_number: d.task_number?.[i],
+          path_img: d.path_img?.[i],
+          date_time: d.date_time?.[i],
+        }))
+        .filter((w) => w.num)
+    : [];
+  return { items, error: line?.error ?? null };
+};
+
+const sendBatchData = async (place, batchNumber, maltingNumber, setLines) => {
+  if (!batchNumber && !maltingNumber) return; // Если ничего не выбрано — не отправляем запрос
 
   try {
     const response = await fetch("http://192.168.131.1:8080/api/wheel", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ place, batch_number: batchNumber, malting:maltingNumber }),
+      body: JSON.stringify({ place, batch_number: batchNumber, malting: maltingNumber }),
     });
 
     if (!response.ok) throw new Error("Ошибка при отправке данных");
 
-    const allNumbers = await response.json(); // Получаем массив чисел от сервера
-    setNumbers(allNumbers.pr_6.filter(Boolean)); // Обновляем кнопки числами
-    setNumberOneLine(allNumbers.line_one.filter(Boolean));
-    setNumberTwoLine(allNumbers.line_two.filter(Boolean));
+    // У каждой линии свой результат: если одна недоступна, остальные всё равно показываем
+    const all = await response.json();
+    setLines({
+      line_one: toLine(all.line_one),
+      line_two: toLine(all.line_two),
+      pr_6: toLine(all.pr_6),
+    });
   } catch (error) {
     console.error("Ошибка:", error);
     alert("Ошибка отправки данных!");
@@ -46,97 +83,62 @@ const App = () => {
   const [searchTerm, setSearchTerm] = useState("");
   const [batchData, setBatchData] = useState({ batch_number_kpc: [], batch_number_6pr: [] });
   const [maltingData, setMaltingData] = useState({ malting_for_kpc: [], malting_for_6pr: [] });
-  const [numbers, setNumbers] = useState([]); // Числа для кнопок
-  const [numberOneLine, setNumberOneLine] = useState([]);
-  const [numberTwoLine, setNumberTwoLine] = useState([]);
+  const [sourceErrors, setSourceErrors] = useState({}); // линии, по которым не загрузились списки
+  const [lines, setLines] = useState(EMPTY_LINES);
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [selectedWheel, setSelectedWheel] = useState(null);
   const [wheelInfo, setWheelInfo] = useState(null);
   const [isToggled, setIsToggled] = useState(false);
 
-  const handleWheelClick = async (wheelNumber, place, line) => {
-    try {
-      const requestBody = {
-        place,
-        wheel_number: wheelNumber.toString(),
-        line,
-        [isToggled ? 'malting_number' : 'batch_number']: selectedBatch.toString()
-      };
-  
-      const response = await fetch("http://192.168.131.1:8080/api/wheel/data", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(requestBody),
-      });
-  
-      if (!response.ok) throw new Error("Ошибка");
-  
-      const result = await response.json();
-      setSelectedWheel(wheelNumber);
-      setWheelInfo(result);
-      setIsModalOpen(true);
-    } catch (error) {
-      console.error("Ошибка:", error);
-    }
+  // Данные колеса уже пришли вместе со списком — отдельный запрос не нужен
+  const handleWheelClick = (wheel) => {
+    setWheelInfo(wheel);
+    setIsModalOpen(true);
   };
 
   useEffect(() => {
     fetchData().then((data) => {
       setBatchData({
-        batch_number_kpc: data.batch_number_kpc,
-        batch_number_6pr: data.batch_number_6pr,
+        batch_number_kpc: data.batch_number_kpc || [],
+        batch_number_6pr: data.batch_number_6pr || [],
       });
       setMaltingData({
-        malting_for_kpc: data.malting_for_kpc,
-        malting_for_6pr: data.malting_for_6pr,
+        malting_for_kpc: data.malting_for_kpc || [],
+        malting_for_6pr: data.malting_for_6pr || [],
       });
+      setSourceErrors(data.errors || {});
     });
   }, [selectedSection, isToggled]);
 
   useEffect(() => {
-    if (!isToggled){
-      if (selectedBatch) {
-        sendBatchData(selectedSection, selectedBatch, null, setNumbers, setNumberOneLine, setNumberTwoLine);
-        console.log("партия")
-      }
+    if (!selectedBatch) return;
+    if (!isToggled) {
+      sendBatchData(selectedSection, selectedBatch, null, setLines);
+    } else {
+      sendBatchData(selectedSection, null, selectedBatch, setLines);
     }
-    else{
-      if (selectedBatch) {
-        sendBatchData(selectedSection, null, selectedBatch, setNumbers, setNumberOneLine, setNumberTwoLine);
-        console.log("плавка")
-        
-      }
-    }
-
-  }, [selectedBatch, selectedSection]);
+  }, [selectedBatch, selectedSection, isToggled]);
 
   useEffect(() => {
-    setSelectedBatch(""); 
+    setSelectedBatch("");
+    setLines(EMPTY_LINES);
   }, [isToggled, selectedSection]);
 
   const displayData = useMemo(() => {
     return isToggled
-      ? selectedSection === 'КПЦ' 
-        ? maltingData.malting_for_kpc 
+      ? selectedSection === 'КПЦ'
+        ? maltingData.malting_for_kpc
         : maltingData.malting_for_6pr
-      : selectedSection === 'КПЦ' 
-        ? batchData.batch_number_kpc 
+      : selectedSection === 'КПЦ'
+        ? batchData.batch_number_kpc
         : batchData.batch_number_6pr;
-  }, [isToggled, selectedSection, batchData, maltingData])
-  
-  const filteredNumbers = searchTerm
-    ? numbers.filter((num) => num.toString().includes(searchTerm))
-    : numbers;
-  
-  const filteredLineOne = searchTerm
-    ? numberOneLine.filter((num) => num?.toString().includes(searchTerm))
-    : numberOneLine;
-  
-  const filteredLineTwo = searchTerm
-    ? numberTwoLine.filter((num) => num?.toString().includes(searchTerm))
-    : numberTwoLine;
-  
-    return (
+  }, [isToggled, selectedSection, batchData, maltingData]);
+
+  // Ошибки загрузки списков, относящиеся к текущему участку
+  const sectionErrors = Object.entries(sourceErrors)
+    .filter(([key]) => key === "server" || (SECTION_LINES[selectedSection] || []).includes(key))
+    .map(([, message]) => message);
+
+  return (
     <div className={styles.container}>
       {/* Выпадающий список для выбора секции */}
       <Dropdown
@@ -145,49 +147,57 @@ const App = () => {
         onChange={(e) => setSelectedSection(e.target.value)}
       />
 
-    <div style={{ display: 'flex', justifyContent: 'center', margin: '20px 0' }}>
-      <ToggleSwitch
-        label="Включить"
-        isOn={isToggled}
-        handleToggle={() => {
-          setIsToggled(!isToggled);
-          setSelectedBatch(""); // Явный сброс при клике
-        }}
-      />
-    </div>
+      <div style={{ display: 'flex', justifyContent: 'center', margin: '20px 0' }}>
+        <ToggleSwitch
+          label="Включить"
+          isOn={isToggled}
+          handleToggle={() => {
+            setIsToggled(!isToggled);
+            setSelectedBatch(""); // Явный сброс при клике
+          }}
+        />
+      </div>
+
+      {sectionErrors.length > 0 && (
+        <div className={styles.sourceWarning}>
+          Список {isToggled ? "плавок" : "партий"} может быть неполным:
+          <ul>
+            {sectionErrors.map((msg) => <li key={msg}>{msg}</li>)}
+          </ul>
+        </div>
+      )}
+
       <SearchableDropdown
-        value={selectedBatch} // Добавляем пропс value
+        value={selectedBatch}
         options={displayData}
-        placeholder="Введите партию"
+        placeholder={isToggled ? "Введите плавку" : "Введите партию"}
         onSelect={(value) => setSelectedBatch(value)}
       />
-      {/* Условное отображение поля поиска */}
+      {/* Поле поиска по номерам колёс */}
       <SearchBar
         placeholder={selectedSection === "КПЦ" ? "Поиск по КПЦ" : "Поиск по Пролету №6"}
         onSearch={setSearchTerm}
       />
 
-      {isModalOpen && (
+      {isModalOpen && wheelInfo && (
         <Modal onClose={() => setIsModalOpen(false)}>
           <h2>Информация о колесе</h2>
-          <p><strong>Номер колеса:</strong> {selectedWheel}</p>
-          {wheelInfo && (
-            <>
-              <div style={{ display: "flex", gap: "30px", justifyContent: "space-between", marginBottom: "20px" }}>
-                <p><strong>Горячая маркировка:</strong> {wheelInfo.hot_number}</p>
-                <p><strong>Плавка:</strong> {wheelInfo.malting_namber}</p>
-                <p><strong>Партия:</strong> {wheelInfo.batch_number}</p>
-                <p><strong>Задание:</strong> {wheelInfo.task_number}</p>
-              </div>
-          
-              {wheelInfo.path_img && (
-                <img
-                  src={`${wheelInfo.path_img.replace("C:\\old\\rust_project\\BACK\\solo_project\\static", "").replace(/\\/g, "/")}`}
-                  alt="Wheel"
-                  style={{ width: "400%", maxWidth: "800px", marginTop: "10px", borderRadius: "8px" }}
-                />
-              )}
-            </>
+          <p><strong>Номер колеса:</strong> {wheelInfo.num}</p>
+          <div style={{ display: "flex", gap: "30px", justifyContent: "space-between", marginBottom: "20px" }}>
+            <p><strong>Горячая маркировка:</strong> {wheelInfo.hot_number}</p>
+            <p><strong>Плавка:</strong> {wheelInfo.malting_namber}</p>
+            <p><strong>Партия:</strong> {wheelInfo.batch_number}</p>
+            <p><strong>Задание:</strong> {wheelInfo.task_number}</p>
+          </div>
+
+          {wheelInfo.path_img ? (
+            <img
+              src={`${wheelInfo.path_img.replace("C:\\old\\rust_project\\BACK\\solo_project\\static", "").replace(/\\/g, "/")}`}
+              alt="Wheel"
+              style={{ width: "400%", maxWidth: "800px", marginTop: "10px", borderRadius: "8px" }}
+            />
+          ) : (
+            <p>Картинка не найдена</p>
           )}
         </Modal>
       )}
@@ -195,53 +205,29 @@ const App = () => {
       <div className={styles.gridContainer}>
         {selectedSection === "КПЦ" ? (
           <>
-            <div className={styles.line}>
-              <h3>Линия №1</h3>
-              <div className={styles.grid}>
-                {filteredLineOne.map((num, index) => (
-                  <GridButton
-                    key={`l1-${index}`}
-                    number={num}
-                    onClick={() => handleWheelClick(num, selectedSection, 1)}
-                  />
-                ))}
-              </div>
-            </div>
-              
-            <div className={styles.line}>
-              <h3>Линия №2</h3>
-              <div className={styles.grid}>
-                {filteredLineTwo.map((num, index) => (
-                  <GridButton
-                    key={`l2-${index}`}
-                    number={num}
-                    onClick={() => handleWheelClick(num, selectedSection, 2)}
-                  />
-                ))}
-              </div>
-            </div>
+            <LineBlock
+              title="Линия №1"
+              line={lines.line_one}
+              searchTerm={searchTerm}
+              onWheelClick={handleWheelClick}
+            />
+            <LineBlock
+              title="Линия №2"
+              line={lines.line_two}
+              searchTerm={searchTerm}
+              onWheelClick={handleWheelClick}
+            />
           </>
         ) : (
-          <>
-            <h3>Пролет №6</h3>
-            <div className={styles.sectionWrapper}>
-              <div className={styles.grid}>
-                {filteredNumbers.map((num, index) => (
-                  <GridButton
-                    key={`pr6-${index}`}
-                    number={num}
-                    onClick={() => handleWheelClick(num, selectedSection, null)}
-                  />
-                ))}
-                {filteredNumbers.length === 0 && 
-                  <p className={styles.noResults}>Ничего не найдено</p>
-                }
-              </div>
-            </div>
-          </>
+          <LineBlock
+            title="Пролет №6"
+            line={lines.pr_6}
+            searchTerm={searchTerm}
+            onWheelClick={handleWheelClick}
+            showEmpty={!!selectedBatch}
+          />
         )}
       </div>
-
     </div>
   );
 };
